@@ -1,7 +1,7 @@
 # LLM-finetuning
 
 
-![Overall RAG FLOW](/assests/ragflow.drawio.png)
+![Overall RAG FLOW](/assessts/ragflow.drawio.png)
 
 Exploration of LLM finetuning task on newer domain
 
