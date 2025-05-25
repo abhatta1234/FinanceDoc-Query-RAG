@@ -1,1 +1,5 @@
 # in this document -- I will discuss in steps what is done in each steps and general logic of why it is done so!
+
+# text splitter - tried basic splitter but it didn't chunk the document properly
+-- recursivecharactertextsplitter did the job so far at least
+
