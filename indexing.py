@@ -46,6 +46,36 @@ print("Shape of embeddings:")
 print(embeddings.shape)
 
 
+# create the ChromaDB index
+
+import chromadb
+from chromadb.config import Settings
+import os
+
+# Define the persist directory
+persist_directory = "/scratch365/abhatta/Custom-RAG-exploration/index/chroma_db"
+os.makedirs(persist_directory, exist_ok=True)
+
+# Initialize ChromaDB client with proper settings
+client = chromadb.PersistentClient(path=persist_directory)
+
+# Create or get a collection
+collection = client.get_or_create_collection(
+    name="annual_report_chunks",
+    metadata={"hnsw:space": "cosine"}  # Using cosine similarity for better results
+)
+
+# Add documents and embeddings
+collection.add(
+    documents=chunks,
+    embeddings=embeddings.tolist(),  # Convert numpy array to list
+    ids=[f"chunk_{i}" for i in range(len(chunks))]
+)
+
+# Verify the collection was created and data was added
+print(f"Collection count: {collection.count()}")
+print(f"Persist directory: {persist_directory}")
+
 # # create faiss index
 # dimension = embeddings[0].shape[0]
 # index = faiss.IndexFlatL2(dimension)
@@ -56,3 +86,9 @@ print(embeddings.shape)
 
 # # load the index
 # index = faiss.read_index("index.faiss")
+
+# When you query later, it will use cosine similarity to find the most similar chunks
+results = collection.query(
+    query_embeddings=[your_query_embedding],
+    n_results=3  # Get top 3 most similar chunks
+)

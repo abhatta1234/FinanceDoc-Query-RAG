@@ -3,3 +3,6 @@
 # text splitter - tried basic splitter but it didn't chunk the document properly
 -- recursivecharactertextsplitter did the job so far at least
 
+# tried Faiss for indexing but for locating the chunk
+# need to manually create a map for it
+# so using ChromaDB for it instead...
