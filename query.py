@@ -3,98 +3,135 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import argparse
+from typing import Literal, Optional
+import textwrap
 
-# Near the top of your script
+# Command line arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("--query", type=str, default="What is total net profit for the year 2023, 2024 and 2025?")
-parser.add_argument("--chunks", type=int, default=8, help="Number of chunks to retrieve")
+parser.add_argument("--model_size", type=str, choices=['small', 'medium', 'large'], default='medium',
+                    help="Model size to use: small (0.5B), medium (1.1B), or large (2.7B)")
 args = parser.parse_args()
 
-# 1. Load ChromaDB collection - update the collection name
-persist_directory = "/scratch365/abhatta/Custom-RAG-exploration/index/chroma_db"
+# Model configurations
+MODEL_CONFIGS = {
+    'small': {
+        'name': 'Qwen/Qwen-0.5B',
+        'max_chunks': 4,
+        'max_new_tokens': 200,
+    },
+    'medium': {
+        'name': 'TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T',
+        'max_chunks': 6,
+        'max_new_tokens': 250,
+    },
+    'large': {
+        'name': 'microsoft/phi-2',
+        'max_chunks': 8,
+        'max_new_tokens': 300,
+    }
+}
+
+class ModelManager:
+    def __init__(self, model_size: Literal['small', 'medium', 'large']):
+        self.config = MODEL_CONFIGS[model_size]
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"\nInitializing {model_size} model: {self.config['name']}")
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config['name'])
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.config['name'],
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            device_map="auto"
+        )
+
+    def generate(self, prompt: str, max_new_tokens: Optional[int] = None) -> str:
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model.generate(
+                inputs.input_ids,
+                max_new_tokens=max_new_tokens or self.config['max_new_tokens'],
+                temperature=0.7,
+                top_p=0.92,
+                repetition_penalty=1.2,
+                do_sample=True,
+                num_beams=3,
+                no_repeat_ngram_size=3
+            )
+        response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        return ' '.join(response.split())  # Clean up spacing
+
+def format_chunk(text: str, width: int = 100) -> str:
+    """Format text chunk with proper wrapping"""
+    return textwrap.fill(text, width=width)
+
+# Initialize ChromaDB and embedding model
+persist_directory = "index/chroma_db"
 client = chromadb.PersistentClient(path=persist_directory)
-collection = client.get_collection("annual_report_chunks_e5_large")  # Updated collection name
+collection = client.get_collection("annual_report_chunks_e5_large")
+embedding_model = SentenceTransformer("intfloat/e5-large-v2")
 
-# 2. Embed the user query - update the embedding model
-model = SentenceTransformer("intfloat/e5-large-v2")  # Updated to match indexing
-user_query = args.query
-query_embedding = model.encode([user_query])
+# Initialize the main model based on selected size
+model_manager = ModelManager(args.model_size)
 
-# 3. Query the collection
+# Embed and retrieve relevant chunks
+print("\n=== RETRIEVING RELEVANT CHUNKS ===")
+query_embedding = embedding_model.encode([args.query])
 results = collection.query(
     query_embeddings=query_embedding.tolist(),
-    n_results=args.chunks
+    n_results=MODEL_CONFIGS[args.model_size]['max_chunks']
 )
 
-# 4. Print the retrieved chunks
-print("\n=== RETRIEVED CHUNKS ===")
-for i, (chunk, cid) in enumerate(zip(results['documents'][0], results['ids'][0])):
-    print(f"Chunk {i+1} (ID: {cid}):\n{chunk}\n{'-'*80}")
+# Display raw chunks
+print("\n=== RAW RETRIEVED CHUNKS ===")
+raw_chunks = results['documents'][0]
+for i, chunk in enumerate(raw_chunks, 1):
+    print(f"\nChunk {i}:")
+    print(format_chunk(chunk))
+    print("-" * 80)
 
-# 5. Load Phi-2 model
-print("\n=== LOADING PHI-2 MODEL ===")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
-phi_model = AutoModelForCausalLM.from_pretrained(
-    "microsoft/phi-2",
-    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-    device_map="auto"
-)
+# Summarize chunks
+print("\n=== SUMMARIZING CHUNKS ===")
+summarization_prompt = f"""Summarize the following text from an annual report, focusing on key financial information and important details:
 
-# Function to generate response using Phi-2
-def generate_phi2_response(prompt, max_new_tokens=300):
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    with torch.no_grad():
-        outputs = phi_model.generate(
-            inputs.input_ids,
-            max_new_tokens=max_new_tokens,
-            temperature=0.6,
-            top_p=0.92,
-            repetition_penalty=1.3,
-            do_sample=True,
-            num_beams=3,
-            no_repeat_ngram_size=3
-        )
-    response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-    
-    response = response.replace(".", ". ").replace(",", ", ")
-    response = ' '.join(response.split())
-    
-    return response
+{' '.join(raw_chunks)}
 
-print("\n=== QUESTION ONLY RESPONSE ===")
-# Generate answer with only the question
-prompt_question_only = f"""You are a financial analyst assistant.
-Question: {user_query}
+Summary:"""
+
+summarized_context = model_manager.generate(summarization_prompt)
+print("\nSummarized Context:")
+print(format_chunk(summarized_context))
+print("-" * 80)
+
+# Generate answer without context
+print("\n=== GENERATING ANSWER WITHOUT CONTEXT ===")
+no_context_prompt = f"""You are a financial analyst assistant.
+Question: {args.query}
 Answer:"""
 
-print("Generating answer without context...")
-response_question_only = generate_phi2_response(prompt_question_only)
-print("\nGenerated Answer (Question Only):")
-print(response_question_only)
+response_no_context = model_manager.generate(no_context_prompt)
+print("\nAnswer (Without Context):")
+print(format_chunk(response_no_context))
 
-print("\n=== CONTEXT-BASED RESPONSE ===")
-# Generate answer with context + question
-context = "\n\n".join(results['documents'][0])
-prompt_with_context = f"""You are a financial analyst assistant that answers questions based on annual reports.
-Below is some context information from annual reports, followed by a question.
-
-Instructions:
-1. Answer the question using only the provided context.
-2. Use proper formatting with spaces between words and after punctuation.
-3. Provide a clear, well-structured response with complete sentences.
-4. If the context doesn't contain the answer, say "I don't have enough information to answer this question."
+# Generate answer with summarized context
+print("\n=== GENERATING ANSWER WITH CONTEXT ===")
+context_prompt = f"""You are a financial analyst assistant. Answer the question based on the following context from annual reports.
 
 Context:
-{context}
+{summarized_context}
 
-Question: {user_query}
+Question: {args.query}
 
-Answer (use proper spacing and formatting):"""
+Answer:"""
 
-print("Generating answer with context...")
-response_with_context = generate_phi2_response(prompt_with_context)
-print("\nGenerated Answer (With Context):")
-print(response_with_context)
+response_with_context = model_manager.generate(context_prompt)
+print("\nAnswer (With Context):")
+print(format_chunk(response_with_context))
+
+# Print model and retrieval settings used
+print("\n=== SETTINGS USED ===")
+print(f"Model: {MODEL_CONFIGS[args.model_size]['name']}")
+print(f"Chunks Retrieved: {len(raw_chunks)}")
+print(f"Model Max Tokens: {MODEL_CONFIGS[args.model_size]['max_new_tokens']}")
 
 
