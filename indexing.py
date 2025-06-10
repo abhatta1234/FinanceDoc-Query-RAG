@@ -94,9 +94,19 @@ os.makedirs(persist_directory, exist_ok=True)
 # Initialize ChromaDB client
 client = chromadb.PersistentClient(path=persist_directory)
 
-# Create or get a collection
-collection = client.get_or_create_collection(
-    name="annual_report_chunks",
+# Create a new collection with a different name to avoid the dimension mismatch
+collection_name = "annual_report_chunks_e5_large"
+
+# Try to delete the collection if it exists (to start fresh)
+try:
+    client.delete_collection(collection_name)
+    print(f"Deleted existing collection: {collection_name}")
+except:
+    print(f"Creating new collection: {collection_name}")
+
+# Create a new collection
+collection = client.create_collection(
+    name=collection_name,
     metadata={"hnsw:space": "cosine", "embedding_model": "intfloat/e5-large-v2"}
 )
 
