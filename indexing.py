@@ -136,20 +136,5 @@ for i in tqdm(range(0, total_chunks, batch_size)):
 
 print(f"Indexing complete! Collection count: {collection.count()}")
 
-# # create faiss index
-# dimension = embeddings[0].shape[0]
-# index = faiss.IndexFlatL2(dimension)
-# index.add(embeddings)
 
-# # save the index
-# faiss.write_index(index, "index.faiss")
-
-# # load the index
-# index = faiss.read_index("index.faiss")
-
-# When you query later, it will use cosine similarity to find the most similar chunks
-results = collection.query(
-    query_embeddings=[your_query_embedding],
-    n_results=3  # Get top 3 most similar chunks
-)
 
