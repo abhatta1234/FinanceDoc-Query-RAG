@@ -134,7 +134,12 @@ for i in tqdm(range(0, total_chunks, batch_size)):
     
     print(f"Added batch {i//batch_size + 1}/{(total_chunks-1)//batch_size + 1} ({end_idx}/{total_chunks} documents)")
 
+# Get the absolute path of the persist directory
+absolute_path = os.path.abspath(persist_directory)
+
 print(f"Indexing complete! Collection count: {collection.count()}")
+print(f"Index is stored at: {absolute_path}")
+print(f"To use this index in other scripts, set persist_directory to: {absolute_path}")
 
 
 
