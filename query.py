@@ -1,79 +1,89 @@
 import chromadb
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+import argparse
 
-# 1. Load ChromaDB collection
+# Near the top of your script
+parser = argparse.ArgumentParser()
+parser.add_argument("--query", type=str, default="What is total net profit for the year 2023, 2024 and 2025?")
+parser.add_argument("--chunks", type=int, default=8, help="Number of chunks to retrieve")
+args = parser.parse_args()
+
+# 1. Load ChromaDB collection - update the collection name
 persist_directory = "/scratch365/abhatta/Custom-RAG-exploration/index/chroma_db"
 client = chromadb.PersistentClient(path=persist_directory)
-collection = client.get_collection("annual_report_chunks")
+collection = client.get_collection("annual_report_chunks_e5_large")  # Updated collection name
 
-# 2. Embed the user query
-model = SentenceTransformer("all-MiniLM-L6-v2")
-user_query = "What are the main achievements in the 2024 annual report?"
+# 2. Embed the user query - update the embedding model
+model = SentenceTransformer("intfloat/e5-large-v2")  # Updated to match indexing
+user_query = args.query
 query_embedding = model.encode([user_query])
 
 # 3. Query the collection
 results = collection.query(
     query_embeddings=query_embedding.tolist(),
-    n_results=5
+    n_results=args.chunks
 )
 
-# 4. Print the results
-for chunk, cid in zip(results['documents'][0], results['ids'][0]):
-    print(f"ID: {cid}\nText: {chunk}\n{'-'*40}")
+# 4. Print the retrieved chunks
+print("\n=== RETRIEVED CHUNKS ===")
+for i, (chunk, cid) in enumerate(zip(results['documents'][0], results['ids'][0])):
+    print(f"Chunk {i+1} (ID: {cid}):\n{chunk}\n{'-'*80}")
 
-# Load the local LLM pipeline (do this once, at the top of your script)
-generator = pipeline("text-generation", model="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+# 5. Load Phi-2 model
+print("\n=== LOADING PHI-2 MODEL ===")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
+phi_model = AutoModelForCausalLM.from_pretrained(
+    "microsoft/phi-2",
+    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    device_map="auto"
+)
 
+# Function to generate response using Phi-2
+def generate_phi2_response(prompt, max_new_tokens=300):
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    with torch.no_grad():
+        outputs = phi_model.generate(
+            inputs.input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=0.7,
+            top_p=0.9,
+            repetition_penalty=1.2,
+            do_sample=True
+        )
+    response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+    return response
 
-print("###########################  Only Question   ##################################################")
+print("\n=== QUESTION ONLY RESPONSE ===")
 # Generate answer with only the question
-prompt_question_only = f"Question: {user_query}\nAnswer:"
-print("Prompt for question only: ", prompt_question_only)
-response_question_only = generator(prompt_question_only, max_new_tokens=150)
-print("\nGenerated Answer (Question Only):")
-print(response_question_only[0]['generated_text'][len(prompt_question_only):].strip())
+prompt_question_only = f"""You are a financial analyst assistant.
+Question: {user_query}
+Answer:"""
 
-print("###########################  With Context   ##################################################")
+print("Generating answer without context...")
+response_question_only = generate_phi2_response(prompt_question_only)
+print("\nGenerated Answer (Question Only):")
+print(response_question_only)
+
+print("\n=== CONTEXT-BASED RESPONSE ===")
 # Generate answer with context + question
 context = "\n\n".join(results['documents'][0])
-prompt_with_context = f"Context:\n{context}\n\nQuestion: {user_query}\nAnswer:"
-print("Prompt for context + question: ", prompt_with_context)
-response_with_context = generator(prompt_with_context, max_new_tokens=150)
+prompt_with_context = f"""You are a financial analyst assistant that answers questions based on annual reports.
+Below is some context information from annual reports, followed by a question.
+Answer the question using only the provided context, being specific and citing details.
+If the context doesn't contain the answer, say "I don't have enough information to answer this question."
+
+Context:
+{context}
+
+Question: {user_query}
+Answer:"""
+
+print("Generating answer with context...")
+response_with_context = generate_phi2_response(prompt_with_context)
 print("\nGenerated Answer (With Context):")
-print(response_with_context[0]['generated_text'][len(prompt_with_context):].strip())
+print(response_with_context)
 
 
-'''
-N=3 outputs
-
-
-
-
-Question: What are the main achievements in the 2024 annual report?
-Answer:
-
-Generated Answer (With Context):
-Financial markets continued to perform exceptionally well, with our strong performance measured
- by stock performance. We have outperformed the S&P 500 Index and the S&P Financials 
- Index for 10 years or more. Our Progress in Measuring Performance is also exceptional. 
- Specifically, for 10 years or more, we have outperformed the S&P 500 Index and the S&P Financials Index 
- for 10 years or mo
-
-
- Prompt for question only:  Question: What are the main achievements in the 2024 annual report?
-Answer:
-
-Generated Answer (Question Only):
-Some of the main achievements in the 2024 annual report are:
-1. Strong sales growth, up 10.4%
-2. Increased profitability, up 15.4%
-3. Reduced operating expenses, down 6.1%
-4. Increased market share, up 0.5%
-5. Strong brand reputation, up 3.5%
-6. Improved financial performance, up 15.4%
-7. Continued focus on sustainability, up 2.4%
-8. Investment in R&D and innovation, up 4.1%
-
-
-'''
