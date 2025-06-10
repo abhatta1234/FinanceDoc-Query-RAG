@@ -52,18 +52,28 @@ for pdf_file in tqdm(pdf_files):
 print(f"Extracted {len(all_documents)} pages from PDFs")
 
 # 2. Better chunking with semantic awareness
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import SemanticTextSplitter
+from transformers import AutoTokenizer
 
-text_splitter = RecursiveCharacterTextSplitter(
+# Initialize the tokenizer from the same model we're using for embeddings
+tokenizer = AutoTokenizer.from_pretrained("intfloat/e5-large-v2")
+
+# Create a semantic text splitter
+text_splitter = SemanticTextSplitter(
+    embeddings_model=model,  # Using the same E5 model for consistency
+    tokenizer=tokenizer,
     chunk_size=500,
-    chunk_overlap=100,  # Increased overlap for better context preservation
-    separators=["\n\n", "\n", ".", ";", ",", " ", ""]
+    chunk_overlap=100,
+    add_start_index=True,
+    strip_whitespace=True,
+    paragraph_separator="\n\n",
+    secondary_separator="\n",
 )
 
 all_chunks = []
 all_metadatas = []
 
-print("Chunking documents...")
+print("Chunking documents semantically...")
 for doc in tqdm(all_documents):
     chunks = text_splitter.split_text(doc["text"])
     # Add metadata to each chunk
@@ -72,7 +82,7 @@ for doc in tqdm(all_documents):
             all_chunks.append(chunk)
             all_metadatas.append(doc["metadata"])
 
-print(f"Created {len(all_chunks)} chunks")
+print(f"Created {len(all_chunks)} semantic chunks")
 
 # 3. Embed the chunks with progress
 from sentence_transformers import SentenceTransformer
