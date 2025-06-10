@@ -4,176 +4,211 @@ from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import time
+from typing import Dict, Tuple
+import re
 
 # Set page configuration
 st.set_page_config(
-    page_title="Annual Report RAG System",
+    page_title="📊 Annual Report RAG System",
     page_icon="📊",
     layout="wide"
 )
 
-# Cache model loading to avoid reloading on each interaction
-@st.cache_resource
+# Initialize session state
+if 'processing' not in st.session_state:
+    st.session_state['processing'] = False
+if 'debug_info' not in st.session_state:
+    st.session_state['debug_info'] = ""
+if 'error_message' not in st.session_state:
+    st.session_state['error_message'] = ""
+if 'model_info' not in st.session_state:
+    st.session_state['model_info'] = ""
+
+# Model configurations
+MODELS: Dict[str, Dict] = {
+    "Small": {
+        "repo": "Qwen/Qwen1.5-0.5B-Chat",  # ~0.5 B params
+        "chunks": 2,
+        "max_tokens": 128,
+    },
+    "Medium": {
+        "repo": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",  # ~1.1 B params
+        "chunks": 4,
+        "max_tokens": 192,
+    },
+    "Large": {
+        "repo": "microsoft/phi-2",  # 2.7 B params
+        "chunks": 6,
+        "max_tokens": 256,
+    },
+}
+
+@st.cache_resource(show_spinner=False)
 def load_embedding_model():
     return SentenceTransformer("intfloat/e5-large-v2")
 
-@st.cache_resource
-def load_llm():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
+@st.cache_resource(show_spinner=False)
+def load_chromadb():
+    db_path = "/Users/amanbhatta/Custom-RAG-exploration/index/chroma_db"
+    client = chromadb.PersistentClient(path=db_path)
+    return client.get_collection("annual_report_chunks_e5_large")
+
+@st.cache_resource(show_spinner=False)
+def load_llm(repo: str) -> Tuple[AutoTokenizer, AutoModelForCausalLM, str]:
+    device = "cpu"  # Force CPU for low-resource environments
+    tokenizer = AutoTokenizer.from_pretrained(repo, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        "microsoft/phi-2",
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device_map="auto"
+        repo,
+        torch_dtype=torch.float32,
+        device_map=None,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
     )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     return tokenizer, model, device
 
-@st.cache_resource
-def load_chromadb():
-    persist_directory = "/Users/amanbhatta/Custom-RAG-exploration/index/chroma_db"
-    client = chromadb.PersistentClient(path=persist_directory)
-    collection = client.get_collection("annual_report_chunks_e5_large")
-    return collection
+def generate(
+    prompt: str,
+    tokenizer: AutoTokenizer,
+    model: AutoModelForCausalLM,
+    device: str,
+    max_tokens: int,
+) -> str:
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+    input_ids = inputs.input_ids.to(device)
+    attn_mask = inputs.attention_mask.to(device)
 
-# Function to generate response using Phi-2
-def generate_phi2_response(prompt, tokenizer, model, device, max_new_tokens=300):
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = model.generate(
-            inputs.input_ids,
-            max_new_tokens=max_new_tokens,
-            temperature=0.6,
-            top_p=0.92,
-            repetition_penalty=1.3,
-            do_sample=True,
-            num_beams=3,
-            no_repeat_ngram_size=3
+            input_ids,
+            attention_mask=attn_mask,
+            max_new_tokens=max_tokens,
+            do_sample=False,
+            temperature=0.1,
+            pad_token_id=tokenizer.eos_token_id,
         )
-    response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-    
-    # Post-process for better formatting
-    response = response.replace(".", ". ").replace(",", ", ")
-    response = ' '.join(response.split())
-    
-    return response
+    text = tokenizer.decode(outputs[0][input_ids.shape[1]:], skip_special_tokens=True).strip()
+    if text == "":
+        return "⚠️ Model could not produce an answer."
+    return text
+
+# ----------------------------
+# Helper: deterministic extraction (moved up before use)
+# ----------------------------
+
+def extract_net_value(text: str, year: str, metric_keywords=("net income", "net profit")) -> str:
+    """Extract a dollar value associated with a given year and metric keywords from text."""
+    pattern_dollar = re.compile(rf"{year}[^\n$]*\$\s?([0-9,.]+)", re.IGNORECASE)
+    pattern_metric = re.compile(rf"({'|'.join(metric_keywords)})[^\n$]*\$\s?([0-9,.]+)", re.IGNORECASE)
+
+    for line in text.splitlines():
+        m = pattern_dollar.search(line)
+        if m:
+            return m.group(1)
+
+    for line in text.splitlines():
+        m = pattern_metric.search(line)
+        if m:
+            return m.group(2)
+
+    return ""
 
 # App title and description
 st.title("📊 Annual Report Analysis System")
-st.markdown("""
-This system uses state-of-the-art AI to analyze annual reports. 
-Ask questions about financial information, and get answers extracted directly from the reports.
-""")
+st.caption("Ask a question about the annual reports — see how the model responds with and without retrieved context.")
 
-# Load models
-with st.spinner("Loading models... (this may take a minute on first run)"):
-    embedding_model = load_embedding_model()
-    tokenizer, phi_model, device = load_llm()
-    collection = load_chromadb()
+# Model selector
+model_size = st.radio(
+    "Model size",
+    list(MODELS.keys()),
+    index=0,
+    horizontal=True,
+)
+model_cfg = MODELS[model_size]
 
-# Sidebar configuration
-st.sidebar.header("Configuration")
-num_chunks = st.sidebar.slider("Number of chunks to retrieve", 1, 15, 8)
-show_retrieved = st.sidebar.checkbox("Show retrieved passages", False)
+# Question input (locked while processing)
+query = st.text_input(
+    "What would you like to know?",
+    placeholder="e.g. What was the net profit for 2023?",
+    disabled=st.session_state.processing,
+)
 
-# Query input
-query = st.text_input("What would you like to know about the annual reports?", 
-                    placeholder="e.g., What was the net profit for 2023?")
+# Early exit
+if query == "":
+    st.info("Enter a question and press Enter ↩️ to run.")
+    st.stop()
 
-# Process the query when entered
-if query:
-    start_time = time.time()
-    
-    # Embed the query
-    with st.spinner("Retrieving relevant information..."):
-        query_embedding = embedding_model.encode([query]).tolist()
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=num_chunks
+# ---------------
+# Processing Flow
+# ---------------
+
+if not st.session_state.processing and query:
+    st.session_state.processing = True
+
+    # 1. Load resources
+    with st.spinner("Loading models & database …"):
+        embed_model = load_embedding_model()
+        collection = load_chromadb()
+        tokenizer, llm, device = load_llm(model_cfg["repo"])
+
+    # 2. Retrieve relevant chunks
+    with st.spinner("Retrieving relevant context …"):
+        query_emb = embed_model.encode([query]).tolist()
+        results = collection.query(query_embeddings=query_emb, n_results=model_cfg["chunks"])
+        chunks = results["documents"][0]
+        metadatas = results["metadatas"][0]
+        context = "\n\n".join(chunks)
+
+    # 3. REFINE: Use the model to condense/align context
+    with st.spinner("Summarizing retrieved context …"):
+        refine_prompt = (
+            "You are an expert analyst assistant. Produce a concise, bullet-point briefing that contains ONLY the information from the context most relevant to answering the given question. "
+            "Include important facts, numbers, definitions, or passages verbatim if necessary. Do NOT add information that is not in the context.\n\n"
+            f"Context:\n{context}\n\nQuestion: {query}\n\nBriefing (bullets):" 
         )
-        retrieval_time = time.time() - start_time
-    
-    # Display retrieved chunks if option is selected
-    if show_retrieved:
-        with st.expander("Retrieved Passages", expanded=True):
-            for i, (chunk, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
-                st.markdown(f"**Chunk {i+1}** (Source: {metadata['source']}, Page: {metadata['page']})")
-                st.text(chunk[:300] + "..." if len(chunk) > 300 else chunk)
-    
-    # Generate answers
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        start_gen_time = time.time()
-        with st.spinner("Generating answer based only on model knowledge..."):
-            # Generate answer with only the question
-            prompt_question_only = f"""You are a financial analyst assistant.
-Question: {query}
-Answer:"""
-            response_question_only = generate_phi2_response(prompt_question_only, tokenizer, phi_model, device)
-            no_context_time = time.time() - start_gen_time
-        
-        st.markdown("### Without Context 🔴")
-        st.markdown(f"<div style='border-left: 4px solid red; padding-left: 10px;'>{response_question_only}</div>", unsafe_allow_html=True)
-        st.caption(f"Generated in {no_context_time:.2f} seconds")
-    
-    with col2:
-        start_gen_time = time.time()
-        with st.spinner("Generating answer based on annual report data..."):
-            # Generate answer with context + question
-            context = "\n\n".join(results['documents'][0])
-            prompt_with_context = f"""You are a financial analyst assistant that answers questions based on annual reports.
-Below is some context information from annual reports, followed by a question.
+        briefing = generate(refine_prompt, tokenizer, llm, device, max_tokens=192)
 
-Instructions:
-1. Answer the question using only the provided context.
-2. Use proper formatting with spaces between words and after punctuation.
-3. Provide a clear, well-structured response with complete sentences.
-4. If the context doesn't contain the answer, say "I don't have enough information to answer this question."
+    # 4. Generate FINAL answer using the summary
+    # Limit raw context to keep within model limits
+    raw_snippet = context[:1500]
 
-Context:
-{context}
+    with st.spinner("Generating answer …"):
+        prompt_ctx = (
+            "You are a knowledgeable assistant. Use ONLY the information in the briefing and the raw context snippet to answer the question. "
+            "If the answer cannot be found, reply 'Not available in provided context'. Do NOT hallucinate.\n\n"
+            f"Briefing:\n{briefing}\n\nRaw context snippet:\n{raw_snippet}\n\nQuestion: {query}\nAnswer:"
+        )
+        answer_ctx = generate(prompt_ctx, tokenizer, llm, device, model_cfg["max_tokens"])
 
-Question: {query}
+    # 5. Display results
+    st.subheader("🟢 Answer")
+    st.write(answer_ctx)
 
-Answer (use proper spacing and formatting):"""
-            response_with_context = generate_phi2_response(prompt_with_context, tokenizer, phi_model, device)
-            with_context_time = time.time() - start_gen_time
-        
-        st.markdown("### With Context 🟢")
-        st.markdown(f"<div style='border-left: 4px solid green; padding-left: 10px;'>{response_with_context}</div>", unsafe_allow_html=True)
-        st.caption(f"Generated in {with_context_time:.2f} seconds")
+    # 6. Retrieved chunks and summary (collapsible)
+    with st.expander("📄 Retrieved Context", expanded=False):
+        st.markdown("#### 🔎 Summarized Context (Briefing)")
+        st.write(briefing)
+        st.markdown("---")
+        st.markdown("#### 📄 Raw Chunks")
+        for i, (chunk, meta) in enumerate(zip(chunks, metadatas)):
+            source = meta.get("source", "?")
+            page = meta.get("page", "?")
+            st.markdown(f"**Chunk {i+1} — {source} (page {page})**")
+            st.text(chunk)
 
-    # Add visual indicator of which is better
-    st.markdown("### Analysis Comparison")
-    
-    col1, col2, col3 = st.columns([1, 3, 1])
-    with col2:
-        st.markdown("""
-        <div style="text-align: center; margin-top: 20px;">
-            <div style="display: inline-block; text-align: center;">
-                <span style="font-size: 24px; color: green;">⬆️</span>
-                <p><strong>With Context (Reliable)</strong><br>Grounded in actual document data</p>
-            </div>
-            <div style="display: inline-block; margin-left: 50px; margin-right: 50px; text-align: center;">
-                <span style="font-size: 24px;">vs</span>
-            </div>
-            <div style="display: inline-block; text-align: center;">
-                <span style="font-size: 24px; color: red;">⬇️</span>
-                <p><strong>Without Context (Caution)</strong><br>May contain inaccuracies</p>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Performance metrics
-    st.markdown("---")
-    metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-    with metrics_col1:
-        st.metric("Retrieval Time", f"{retrieval_time:.2f}s")
-    with metrics_col2:
-        st.metric("Response Time (No Context)", f"{no_context_time:.2f}s")
-    with metrics_col3:
-        st.metric("Response Time (With Context)", f"{with_context_time:.2f}s")
+    # 7. Reset processing flag
+    st.session_state.processing = False
 
 else:
     # Display placeholder when no query is entered
     st.info("Enter a question above to get started!")
+    
+    # Show model information
+    st.markdown("### Model Information")
+    for size, config in MODELS.items():
+        st.markdown(f"""
+        **{size.title()} Model ({config['repo']})**
+        - Context chunks: {config['chunks']}
+        - Max answer length: {config['max_tokens']} tokens
+        """)
