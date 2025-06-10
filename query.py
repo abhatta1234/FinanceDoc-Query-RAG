@@ -48,12 +48,18 @@ def generate_phi2_response(prompt, max_new_tokens=300):
         outputs = phi_model.generate(
             inputs.input_ids,
             max_new_tokens=max_new_tokens,
-            temperature=0.7,
-            top_p=0.9,
-            repetition_penalty=1.2,
-            do_sample=True
+            temperature=0.6,
+            top_p=0.92,
+            repetition_penalty=1.3,
+            do_sample=True,
+            num_beams=3,
+            no_repeat_ngram_size=3
         )
     response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+    
+    response = response.replace(".", ". ").replace(",", ", ")
+    response = ' '.join(response.split())
+    
     return response
 
 print("\n=== QUESTION ONLY RESPONSE ===")
@@ -72,14 +78,19 @@ print("\n=== CONTEXT-BASED RESPONSE ===")
 context = "\n\n".join(results['documents'][0])
 prompt_with_context = f"""You are a financial analyst assistant that answers questions based on annual reports.
 Below is some context information from annual reports, followed by a question.
-Answer the question using only the provided context, being specific and citing details.
-If the context doesn't contain the answer, say "I don't have enough information to answer this question."
+
+Instructions:
+1. Answer the question using only the provided context.
+2. Use proper formatting with spaces between words and after punctuation.
+3. Provide a clear, well-structured response with complete sentences.
+4. If the context doesn't contain the answer, say "I don't have enough information to answer this question."
 
 Context:
 {context}
 
 Question: {user_query}
-Answer:"""
+
+Answer (use proper spacing and formatting):"""
 
 print("Generating answer with context...")
 response_with_context = generate_phi2_response(prompt_with_context)
