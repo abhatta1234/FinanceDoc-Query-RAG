@@ -7,13 +7,14 @@ for the retrieval later
 
 
 # 1. Read the documents
+import os
+from unstructured.partition.pdf import partition_pdf
 
-import fitz
 document = ""
-with fitz.open("docs/annualreport-2024.pdf") as doc:
-    for page in doc:
-        text = page.get_text()
-        document += text
+# Extract text using Unstructured
+elements = partition_pdf("docs/annualreport-2024.pdf", strategy="fast")
+for element in elements:
+    document += str(element.text) + " "
 
 # 2. Split the documents into chunks
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -75,7 +76,6 @@ collection.add(
 # Verify the collection was created and data was added
 print(f"Collection count: {collection.count()}")
 print(f"Persist directory: {persist_directory}")
-
 # # create faiss index
 # dimension = embeddings[0].shape[0]
 # index = faiss.IndexFlatL2(dimension)
@@ -92,3 +92,4 @@ results = collection.query(
     query_embeddings=[your_query_embedding],
     n_results=3  # Get top 3 most similar chunks
 )
+
