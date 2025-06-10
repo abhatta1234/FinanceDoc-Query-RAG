@@ -77,7 +77,7 @@ print(f"Created {len(all_chunks)} chunks")
 # 3. Embed the chunks with progress
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+model = SentenceTransformer("intfloat/e5-large-v2")
 print("Generating embeddings...")
 embeddings = model.encode(all_chunks, show_progress_bar=True)
 
@@ -97,17 +97,32 @@ client = chromadb.PersistentClient(path=persist_directory)
 # Create or get a collection
 collection = client.get_or_create_collection(
     name="annual_report_chunks",
-    metadata={"hnsw:space": "cosine"}
+    metadata={"hnsw:space": "cosine", "embedding_model": "intfloat/e5-large-v2"}
 )
 
-# Add documents with their metadata
+# Add documents with their metadata in batches
 print("Indexing documents in ChromaDB...")
-collection.add(
-    documents=all_chunks,
-    embeddings=embeddings.tolist(),
-    metadatas=all_metadatas,
-    ids=[f"chunk_{i}" for i in range(len(all_chunks))]
-)
+batch_size = 500  # A safe batch size well below the limit
+
+# Process in batches
+total_chunks = len(all_chunks)
+for i in tqdm(range(0, total_chunks, batch_size)):
+    # Get the current batch
+    end_idx = min(i + batch_size, total_chunks)
+    batch_documents = all_chunks[i:end_idx]
+    batch_embeddings = embeddings[i:end_idx].tolist()
+    batch_metadatas = all_metadatas[i:end_idx]
+    batch_ids = [f"chunk_{j}" for j in range(i, end_idx)]
+    
+    # Add the current batch
+    collection.add(
+        documents=batch_documents,
+        embeddings=batch_embeddings,
+        metadatas=batch_metadatas,
+        ids=batch_ids
+    )
+    
+    print(f"Added batch {i//batch_size + 1}/{(total_chunks-1)//batch_size + 1} ({end_idx}/{total_chunks} documents)")
 
 print(f"Indexing complete! Collection count: {collection.count()}")
 
